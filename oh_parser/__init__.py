@@ -38,7 +38,6 @@ from __future__ import annotations
 
 # Loader functions
 from .loader import (
-    discover_oh_profiles,
     load_profile,
     load_profiles,
     list_subjects,
@@ -83,7 +82,6 @@ from .utils import (
 
 __all__ = [
     # Loader
-    "discover_oh_profiles",
     "load_profile",
     "load_profiles",
     "list_subjects",
