@@ -6,15 +6,18 @@ This tutorial will walk you through statistical analysis of Occupational Health 
 **No advanced statistics background required** - we'll explain everything as we go.
 
 By the end, you'll understand:
+- What exactly you're analyzing (the unit of analysis)
 - Why we use Linear Mixed Models (and why t-tests won't work here)
 - How to run a complete analysis
 - How to interpret your results
 - What numbers matter and what they mean
+- How to handle common edge cases
 
 ---
 
 ## Table of Contents
 
+0. [What Are We Actually Analyzing?](#0-what-are-we-actually-analyzing)
 1. [The Problem: Why Can't We Just Use T-Tests?](#1-the-problem-why-cant-we-just-use-t-tests)
 2. [The Solution: Linear Mixed Models](#2-the-solution-linear-mixed-models)
 3. [Your First Analysis: Step by Step](#3-your-first-analysis-step-by-step)
@@ -24,6 +27,49 @@ By the end, you'll understand:
 7. [Complete Example with Interpretation](#7-complete-example-with-interpretation)
 8. [Quick Reference Card](#8-quick-reference-card)
 9. [Glossary](#9-glossary)
+10. [Edge Cases & Troubleshooting](#10-edge-cases--troubleshooting)
+
+---
+
+## 0. What Are We Actually Analyzing?
+
+Before diving into statistics, let's be crystal clear about **what we're analyzing**.
+
+### The Unit of Analysis: Subject × Day
+
+Your primary unit of analysis is **one subject on one day**.
+
+```
+Each row in your analysis = one person's measurements for one day
+```
+
+**Key points:**
+- Each subject contributes **daily aggregated metrics** (e.g., average EMG over the whole day)
+- The data are **naturally unbalanced** - some subjects have 3 days, others have 5
+- You analyze **each modality separately** (EMG models don't mix with posture or HR models)
+
+### Why This Matters
+
+Most statistics textbooks assume:
+1. Every observation is independent [X]
+2. You have the same number of observations per group [X]
+
+Your data violates both assumptions **by design** - and that's fine! We just need the right tools.
+
+### Where oh_parser Ends and oh_stats Begins
+
+```
+oh_parser                          oh_stats
+---------                          --------
+Load JSON profiles                 Prepare analysis tables
+Extract modality metrics    -->    Check data quality
+Clean & validate data              Fit statistical models
+                                   Correct for multiple testing
+                                   Generate reports
+```
+
+**oh_parser** extracts and validates your data.  
+**oh_stats** answers your research questions.
 
 ---
 
@@ -157,6 +203,37 @@ print(f"Number of outcomes: {len(ds['outcome_vars'])}")
 - EMG is measured on left AND right sides
 - `"both"` keeps them as separate rows (more data, but left/right from same day are related)
 - `"average"` averages them together (simpler, fewer statistical issues)
+
+### Understanding the AnalysisDataset
+
+The `ds` you just created is an **AnalysisDataset** - a sealed container that holds everything needed for analysis:
+
+```python
+# What's inside ds:
+ds['data']          # The actual data (pandas DataFrame, long format)
+ds['outcome_vars']  # List of outcome column names
+ds['id_var']        # Clustering variable (usually 'subject_id')
+ds['time_var']      # Time variable (usually 'day_index')
+ds['sensor']        # Which sensor ('emg', 'posture', etc.)
+ds['level']         # Aggregation level ('daily', 'hourly')
+```
+
+**Why "long format" matters:**
+
+In long format, each row is ONE observation:
+
+```
+subject_id  day_index  side   EMG_intensity.mean_percent_mvc
+----------  ---------  ----   ------------------------------
+S001        1          left   8.2
+S001        1          right  9.1
+S001        2          left   7.8
+S001        2          right  8.5
+S002        1          left   12.3
+...
+```
+
+This is what mixed models expect. The `AnalysisDataset` ensures all our functions speak the same language.
 
 ### Step 2: Check Your Data Quality (ALWAYS DO THIS!)
 
@@ -338,6 +415,49 @@ EMG_intensity.iemg_percent_seconds   0.0003      0.0007         True
 **Our strategy:**
 1. Use **FDR** across all outcomes (discovery phase)
 2. Use **FWER (Holm)** for post-hoc comparisons within significant outcomes
+
+### Critical Detail: Which P-Value Feeds FDR?
+
+This is subtle but important. When you see the coefficients table:
+
+```
+             term   estimate  p_value
+C(day_index)[T.2]     -0.411    0.618   <-- NOT this p-value!
+C(day_index)[T.3]     -0.028    0.973
+C(day_index)[T.4]     -1.931    0.022
+C(day_index)[T.5]     -1.643    0.092
+```
+
+**We do NOT use these individual coefficient p-values for FDR correction.**
+
+Instead, we use the **omnibus Likelihood Ratio Test (LRT)** p-value. This tests:
+
+> "Does including 'day' improve the model AT ALL?"
+
+```python
+# The LRT compares two models:
+# Full model:    EMG ~ day + side + (1|subject)
+# Reduced model: EMG ~ side + (1|subject)
+
+# Access it from the result:
+print(result['fit_stats']['lrt_pvalue'])  # This feeds FDR!
+```
+
+**Why the LRT, not coefficient p-values?**
+
+- Coefficient p-values test "Day 2 vs Day 1", "Day 3 vs Day 1", etc. - that's many tests per outcome!
+- LRT asks one question per outcome: "Is there ANY day effect?"
+- FDR needs ONE p-value per outcome to work correctly
+
+**The two-layer system:**
+
+```
+Layer 1 (across outcomes): FDR on LRT p-values
+   "Which outcomes show any day effect?"
+        ↓
+Layer 2 (within outcome): Holm on post-hoc contrasts  
+   "Which specific days differ?" (only for significant outcomes)
+```
 
 ---
 
@@ -607,7 +727,25 @@ print(fdr[fdr['significant']])
 | Effect | Estimate with 95% CI | "Day 4 was -1.93 (95% CI: -3.58 to -0.28) lower" |
 | Significance | p-value (corrected if multiple tests) | "p = 0.022" or "p_adj = 0.035" |
 | Model fit | AIC for comparison | "AIC = 2023.1" |
+### Reporting Template for Papers
 
+Here's a template you can adapt for your Methods and Results sections:
+
+**Methods section:**
+> Daily EMG metrics were analyzed using linear mixed models with day as a fixed effect 
+> and random intercepts for subjects to account for repeated measurements. Given the 
+> exploratory nature of the analysis across N outcomes, p-values were adjusted using 
+> the Benjamini-Hochberg procedure to control the false discovery rate at 5%. Post-hoc 
+> pairwise comparisons between days were corrected using the Holm method. Analyses 
+> were performed using the oh_stats package (v0.3.0) in Python.
+
+**Results section:**
+> We analyzed 320 observations from 37 subjects over 5 monitoring days. The intraclass 
+> correlation was 0.50, indicating that 50% of the variance in EMG intensity was 
+> attributable to between-subject differences, justifying the use of mixed models. 
+> After FDR correction, 4 of 10 EMG outcomes showed significant day effects (all 
+> p_adj < 0.05). For mean %MVC, Day 4 was significantly lower than Day 1 
+> (β = -1.93, 95% CI: -3.58 to -0.28, p = 0.022).
 ### Decision Tree
 
 ```
@@ -647,6 +785,188 @@ START: Do you have repeated measures per subject?
 
 ---
 
+## 10. Edge Cases & Troubleshooting
+
+Real data is messy. Here's how to handle common problems.
+
+### 10.1 Missing Days / Unbalanced Data
+
+**The situation:** Some subjects have 5 days of data, others have only 3.
+
+**Good news:** LMMs handle this naturally! They use all available data and don't require balanced designs.
+
+**What to watch for:**
+- Is missingness random or systematic? (e.g., do subjects drop out because they're injured?)
+- Very few observations per subject (< 3) may cause convergence issues
+
+```python
+# Check missingness patterns
+missing = missingness_report(ds)
+print(missing[missing['pct_missing'] > 10])  # Flag outcomes with >10% missing
+```
+
+### 10.2 Degenerate Outcomes (No Variance)
+
+**The situation:** An outcome is nearly constant (e.g., 95% of values are zero).
+
+**The problem:** No variance = nothing to model. The model literally can't estimate effects.
+
+**Solution:** Exclude these outcomes from analysis.
+
+```python
+variance = check_variance(ds)
+degenerate = variance[variance['is_degenerate']]
+print(f"Degenerate outcomes to exclude: {list(degenerate['outcome'])}")
+```
+
+### 10.3 Convergence Failures
+
+**The situation:** `result['converged'] = False`
+
+**What it means:** The optimizer couldn't find a stable solution. Results are unreliable.
+
+**What to try:**
+1. **Simplify the model**: Remove interactions, use `side="average"`
+2. **Check for degenerate outcomes**: Near-constant values cause problems
+3. **Check sample size**: Need enough subjects (ideally 20+) and observations
+4. **Look at warnings**: `result['warnings']` often explains the issue
+
+```python
+if not result['converged']:
+    print("Convergence failed!")
+    print("Warnings:", result.get('warnings', []))
+    # Try simpler model
+    ds_simple = prepare_daily_emg(profiles, side="average")
+    result = fit_lmm(ds_simple, outcome)
+```
+
+### 10.4 EMG Left/Right Correlation (side="both")
+
+**The situation:** You kept both sides as separate rows, but left and right from the same subject-day are correlated.
+
+**The problem:** A subject-only random intercept is an approximation - it doesn't fully capture same-day correlations.
+
+**Three defensible strategies:**
+
+| Strategy | Pros | Cons |
+|----------|------|------|
+| `side="average"` | Simplest, no correlation issue | Loses side-specific information |
+| Analyze sides separately | Clean interpretation | Doubles the number of tests |
+| Keep `side="both"` | More power | Slight model misspecification |
+
+**Recommendation:** Start with `side="average"` for simplicity. Use `side="both"` for sensitivity analysis.
+
+### 10.5 Skewed Distributions
+
+**The situation:** Residuals are not normally distributed (e.g., right-skewed EMG data).
+
+**Don't panic!** LMMs are fairly robust to moderate non-normality, especially with larger samples.
+
+**When to act:**
+- Severe skewness (> 2) with small samples
+- Heavy ceiling/floor effects
+
+**Solutions:**
+```python
+import numpy as np
+
+# Log transform (add small constant to handle zeros)
+ds['data']['log_outcome'] = np.log1p(ds['data'][outcome])
+
+# Square root transform (gentler than log)
+ds['data']['sqrt_outcome'] = np.sqrt(ds['data'][outcome])
+```
+
+### 10.6 Outliers
+
+**The situation:** A few extreme values are pulling the model.
+
+**How to identify:**
+```python
+diag = residual_diagnostics(result)
+print(f"Number of outliers (|z| > 3): {diag['n_outliers']}")
+
+# See which observations are outliers
+outlier_idx = np.abs(diag['standardized']) > 3
+print(ds['data'][outlier_idx])
+```
+
+**What to do:**
+1. **Investigate**: Are they data errors or real extreme values?
+2. **Sensitivity analysis**: Run with and without outliers
+3. **Report both**: "Results were similar with outliers excluded (N=2)"
+
+### 10.7 Likert/Ordinal Data
+
+**The situation:** You have questionnaire items on a 1-5 scale.
+
+**The theoretical issue:** Likert scales are ordinal, not continuous. The difference between 1->2 isn't necessarily the same as 4->5.
+
+**Practical guidance:**
+
+| Distribution | Recommendation |
+|--------------|----------------|
+| Roughly symmetric, no ceiling/floor | Treat as continuous with LMM (common practice) |
+| Heavy ceiling (most responses = 5) | Consider ordinal models or dichotomize |
+| Heavy floor (most responses = 1) | Consider ordinal models or dichotomize |
+
+**If treating as continuous:** Always report medians and IQR alongside means.
+
+### 10.8 Proportions (0-1 bounded)
+
+**The situation:** Your outcome is a proportion (e.g., % time in a posture).
+
+**The problem:** Values bounded at 0 and 1; residuals can't be normal at the extremes.
+
+**Pragmatic solution (current):**
+```python
+# Logit transform (handle 0 and 1 with small epsilon)
+epsilon = 0.001
+ds['data']['logit_prop'] = np.log(
+    (ds['data'][outcome] + epsilon) / (1 - ds['data'][outcome] + epsilon)
+)
+```
+
+**Better solution (future):** Beta regression for proportions.
+
+### 10.9 Count Data
+
+**The situation:** Your outcome is a count (e.g., number of posture transitions).
+
+**The problem:** Counts are non-negative integers, often with many zeros.
+
+**Critical warning:** Counts often scale with **wear time**. 10 transitions in 8 hours is NOT the same as 10 transitions in 4 hours!
+
+**Pragmatic solution:**
+```python
+# Convert to rate, then log transform
+ds['data']['rate'] = ds['data']['count'] / ds['data']['wear_hours']
+ds['data']['log_rate'] = np.log1p(ds['data']['rate'])
+```
+
+**Better solution (future):** Poisson or negative binomial models with an offset for exposure.
+
+### Quick Troubleshooting Checklist
+
+```
+[ ] Model didn't converge?
+    -> Try side="average", check for degenerate outcomes
+
+[ ] Residuals look weird?
+    -> Check for outliers, consider transformation
+
+[ ] Unexpected results?
+    -> Check missingness patterns, verify data quality
+
+[ ] p-values all non-significant but you expected effects?
+    -> Check ICC (high ICC = less power), check sample size
+
+[ ] Too many significant results?
+    -> Are you using FDR correction? Check for data leakage
+```
+
+---
+
 ## Still Confused?
 
 That's OK! Statistics is hard. Here are some resources:
@@ -660,4 +980,4 @@ every detail to get useful results - that's why we built this package!
 
 ---
 
-*OH Stats Tutorial v1.0 - January 2026*
+*OH Stats Tutorial v1.1 - January 2026*
